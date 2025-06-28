@@ -49,7 +49,6 @@
     'Bandingkan pengeluaran di berbagai periode',
     'Temukan outlier dalam data pengeluaran',
     'Tunjukkan total pengeluaran yang teragregasi',
-    'Apa kabar hari ini?',
     'Lakukan analisis data eksplorasi'
   ];
 
@@ -109,18 +108,22 @@
       // Handle chart data based on intent
       if (response.intent || response.intents) {
         const intents = Array.isArray(response.intents) ? response.intents : [response.intent];
-        const intentString = intents.join(' ').toLowerCase();
-
-        if (intentString.includes('anomaly')) {
-          await loadAnomalyChart();
-        } else if (intentString.includes('trend')) {
-          await loadTrendChart();
-        } else if (intentString.includes('comparative')) {
-          await loadComparativeChart();
-        } else if (intentString.includes('aggregation')) {
-          await loadCategoryBreakdownChart();
-        } else if (intentString.includes('rca')) {
-          await loadHeatmapChart();
+        for(const intent of intents) {
+          if (intent === 'anomaly_detection') {
+            await loadAnomalyChart();
+          } else if (intent === 'trend_analysis') {
+            await loadTrendChart();
+          } else if (intent === 'comparative_analysis') {
+            await loadComparativeChart();
+          } else if (intent === 'aggregation_query') {
+            await loadCategoryBreakdownChart();
+          } else if (intent === 'rca_request') {
+            await loadHeatmapChart();
+          } else if (intent === 'eda_request') {
+            await loadTrendChart(); // EDA typically shows trends
+          } else if (intent === 'outlier_detection') {
+            await loadAnomalyChart(); // Outliers are similar to anomalies
+          }
         }
 
         // Reload messages after chart is loaded to show the chart
@@ -145,11 +148,11 @@
     }
   }
 
-  const loadTrendChart = () => loadChart(api.getTrendChart);
-  const loadAnomalyChart = () => loadChart(api.getAnomalyScatterChart.bind(null, 'ml'));
-  const loadComparativeChart = () => loadChart(api.getTrendChart);
-  const loadCategoryBreakdownChart = () => loadChart(api.getCategoryBreakdownChart);
-  const loadHeatmapChart = () => loadChart(api.getHeatmapChart);
+  const loadTrendChart = () => loadChart((roomId) => api.getTrendChart(roomId));
+  const loadAnomalyChart = () => loadChart((roomId) => api.getAnomalyScatterChart('ml', roomId));
+  const loadComparativeChart = () => loadChart((roomId) => api.getTrendChart(roomId));
+  const loadCategoryBreakdownChart = () => loadChart((roomId) => api.getCategoryBreakdownChart(roomId));
+  const loadHeatmapChart = () => loadChart((roomId) => api.getHeatmapChart(roomId));
 
   function useSuggestion(suggestion) {
     currentMessage.set(suggestion);
@@ -175,6 +178,130 @@
 
   function formatTime(timestamp) {
     return new Date(timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function getChartType(chartData) {
+    console.log('getChartType called with:', chartData);
+    
+    // Check if the message has chart_type information
+    if (typeof chartData === 'object' && chartData !== null) {
+      // First check for chart_type field directly
+      if (chartData.chart_type) {
+        console.log('Found chart_type:', chartData.chart_type);
+        switch (chartData.chart_type) {
+          case 'pie_chart':
+            return 'pie';
+          case 'bar_chart':
+            return 'bar';
+          case 'line_chart':
+            return 'line';
+          case 'scatter_plot':
+            return 'scatter';
+          case 'heatmap':
+            return 'bar'; // Represent heatmap as bar chart in Chart.js
+          default:
+            return 'line';
+        }
+      }
+      
+      // Check nested chart_data for chart_type
+      if (chartData.chart_data && chartData.chart_data.chart_type) {
+        console.log('Found nested chart_type:', chartData.chart_data.chart_type);
+        return getChartType(chartData.chart_data);
+      }
+      
+      // Check double nested chart_data (for trend charts)
+      if (chartData.chart_data && chartData.chart_data.chart_data && chartData.chart_data.chart_data.chart_type) {
+        console.log('Found double nested chart_type:', chartData.chart_data.chart_data.chart_type);
+        return getChartType(chartData.chart_data.chart_data);
+      }
+      
+      // Check if data structure suggests chart types
+      if (chartData.data && Array.isArray(chartData.data) && chartData.data[0]) {
+        const firstTrace = chartData.data[0];
+        console.log('Checking direct data structure, firstTrace:', firstTrace);
+        if (firstTrace.type === 'pie' || (firstTrace.labels && firstTrace.values)) {
+          return 'pie';
+        }
+        if (firstTrace.type === 'heatmap' || (firstTrace.z && Array.isArray(firstTrace.z))) {
+          return 'bar'; // Represent heatmap as bar chart in Chart.js
+        }
+        if (firstTrace.type === 'scatter' || firstTrace.mode === 'markers') {
+          return 'scatter';
+        }
+        if (firstTrace.type === 'bar') {
+          return 'bar';
+        }
+      }
+      
+      // Check nested data structure for chart detection
+      if (chartData.chart_data && chartData.chart_data.data && Array.isArray(chartData.chart_data.data) && chartData.chart_data.data[0]) {
+        const firstTrace = chartData.chart_data.data[0];
+        console.log('Checking nested data structure, firstTrace:', firstTrace);
+        if (firstTrace.type === 'pie' || (firstTrace.labels && firstTrace.values)) {
+          return 'pie';
+        }
+        if (firstTrace.type === 'heatmap' || (firstTrace.z && Array.isArray(firstTrace.z))) {
+          return 'bar'; // Represent heatmap as bar chart in Chart.js
+        }
+        if (firstTrace.type === 'scatter' && firstTrace.mode && firstTrace.mode.includes('lines')) {
+          console.log('Found scatter plot with lines mode, returning line');
+          return 'line'; // Plotly scatter with lines mode should be line chart
+        }
+        if (firstTrace.type === 'scatter' || firstTrace.mode === 'markers') {
+          return 'scatter';
+        }
+        if (firstTrace.type === 'bar') {
+          return 'bar';
+        }
+      }
+      
+      // Check double nested data structure (for complex trend charts)
+      if (chartData.chart_data && chartData.chart_data.chart_data && chartData.chart_data.chart_data.data && Array.isArray(chartData.chart_data.chart_data.data) && chartData.chart_data.chart_data.data[0]) {
+        const firstTrace = chartData.chart_data.chart_data.data[0];
+        console.log('Checking double nested data structure, firstTrace:', firstTrace);
+        if (firstTrace.type === 'pie' || (firstTrace.labels && firstTrace.values)) {
+          return 'pie';
+        }
+        if (firstTrace.type === 'heatmap' || (firstTrace.z && Array.isArray(firstTrace.z))) {
+          return 'bar'; // Represent heatmap as bar chart in Chart.js
+        }
+        if (firstTrace.type === 'scatter' && firstTrace.mode && firstTrace.mode.includes('lines')) {
+          console.log('Found scatter plot with lines mode in double nested, returning line');
+          return 'line'; // Plotly scatter with lines mode should be line chart
+        }
+        if (firstTrace.type === 'scatter' || firstTrace.mode === 'markers') {
+          return 'scatter';
+        }
+        if (firstTrace.type === 'bar') {
+          return 'bar';
+        }
+      }
+      
+      // Special handling for heatmap data without plotly data array
+      if (chartData.raw_data && chartData.raw_data.values && chartData.raw_data.x_labels && chartData.raw_data.y_labels) {
+        console.log('Found heatmap raw_data structure, returning bar');
+        return 'bar';
+      }
+    }
+    
+    console.log('No chart type detected, returning default line');
+    // Default fallback
+    return 'line';
+  }
+
+  function getChartTypeFromMessage(message) {
+    console.log('getChartTypeFromMessage called with message:', message);
+    if (message.chart_data) {
+      console.log('Using message.chart_data');
+      return getChartType(message.chart_data);
+    }
+    if (message.content && message.content.chart_data) {
+      console.log('Using message.content.chart_data');
+      return getChartType(message.content);
+    }
+    console.log('No chart data found, returning line');
+    return 'line';
   }
 
   // Intent mapping for consistent emoji and type handling
@@ -252,7 +379,13 @@ The spending distribution shows significant variance across functional areas, wi
 • **Total Months:** ${summary.total_months}
 • **Average Monthly Spending:** Rp ${(summary.average_monthly / 1000000).toFixed(2)} million
 ${summary.min_month ? `• **Lowest Month:** ${summary.min_month.month_year} (Rp ${(summary.min_month.amount / 1000000).toFixed(2)} million)` : ''}
-${summary.max_month ? `• **Highest Month:** ${summary.max_month.month_year} (Rp ${(summary.max_month.amount / 1000000).toFixed(2)} million)` : ''}`;
+${summary.max_month ? `• **Highest Month:** ${summary.max_month.month_year} (Rp ${(summary.max_month.amount / 1000000).toFixed(2)} million)` : ''}
+
+The trend shows ${summary.max_month && summary.min_month ? 
+  (summary.max_month.amount > summary.min_month.amount ? 
+    `an **increase** of Rp ${((summary.max_month.amount - summary.min_month.amount) / 1000000).toFixed(2)} million from ${summary.min_month.month_year} to ${summary.max_month.month_year}` :
+    `a **decrease** of Rp ${((summary.min_month.amount - summary.max_month.amount) / 1000000).toFixed(2)} million from ${summary.min_month.month_year} to ${summary.max_month.month_year}`) :
+  'expense patterns over the analyzed period'}.`;
       }
 
       // Handle anomaly summary
@@ -263,6 +396,18 @@ ${summary.max_month ? `• **Highest Month:** ${summary.max_month.month_year} (R
 • **Detection Method:** ${summary.detection_method?.replace(/_/g, ' ').toUpperCase() || 'Unknown'}
 ${summary.avg_anomaly_amount ? `• **Average Anomaly Amount:** Rp ${(summary.avg_anomaly_amount / 1000000).toFixed(2)} million` : ''}
 ${summary.data_optimization ? `\n**Note:** ${summary.data_optimization}` : ''}`;
+      }
+
+      // Handle heatmap summary
+      if (summary.cost_centers_shown !== undefined || summary.months_covered !== undefined) {
+        return `**Heatmap Analysis Summary:**
+
+• **Cost Centers Analyzed:** ${summary.cost_centers_shown || 'N/A'}
+• **Time Period:** ${summary.months_covered || 'N/A'} months
+${summary.highest_spending ? `• **Highest Spending Center:** ${summary.highest_spending.cost_center_name || 'Unknown'} (${summary.highest_spending.cost_center_id || 'N/A'})
+  Amount: Rp ${(summary.highest_spending.amount / 1000000).toFixed(2)} million` : ''}
+
+This heatmap shows spending patterns across different cost centers over time, helping identify concentration areas and trends.`;
       }
 
       // Handle other array types
@@ -300,10 +445,10 @@ ${summary.data_optimization ? `\n**Note:** ${summary.data_optimization}` : ''}`;
 
       // Then find and replace mathematical formulas in brackets (only if katex is available)
       if (katex) {
-        processedText = processedText.replace(/\[\s*\\text\{[^}]+\}[^[\]]*\]/g, match => {
+        processedText = processedText.replace(/\[\s*([^[\]]*(?:\\left|\\right|\\frac|\\times|\\approx|\\pm|\\cdot|\\div)[^[\]]*)\s*\]/g, match => {
           try {
             // Remove the outer brackets
-            let formula = match.slice(1, -1);
+            let formula = match.slice(1, -1).trim();
 
             // Escape percentage signs for LaTeX
             formula = formula.replace(/%/g, '\\%');
@@ -484,9 +629,15 @@ ${summary.data_optimization ? `\n**Note:** ${summary.data_optimization}` : ''}`;
               class="leading-relaxed min-w-[250px] break-words prose prose-invert prose-sm max-w-none"
             >
               {#if message.chart_data}
+                <!-- Also show the text content if available -->
+                {#if typeof message.content === 'string'}
+                  <div class="mb-3">
+                    {@html safeHtml(processTextWithMath(message.content))}
+                  </div>
+                {/if}
                 <!-- Message with chart data -->
                 <div class="max-w-full overflow-x-auto bg-white/5 p-2 rounded-md">
-                  <ChartComponent data={message.chart_data} type="line" />
+                  <ChartComponent data={message.chart_data} type={getChartTypeFromMessage(message)} />
                   {#if message.summary}
                     <div class="max-w-full overflow-x-hidden mt-4 p-3 bg-black/20 rounded-md">
                       <h4 class="text-sm font-semibold mb-2">Summary:</h4>
@@ -496,12 +647,6 @@ ${summary.data_optimization ? `\n**Note:** ${summary.data_optimization}` : ''}`;
                     </div>
                   {/if}
                 </div>
-                <!-- Also show the text content if available -->
-                {#if typeof message.content === 'string'}
-                  <div class="mt-3">
-                    {@html safeHtml(processTextWithMath(message.content))}
-                  </div>
-                {/if}
               {:else if typeof message.content === 'string'}
                 {@html safeHtml(processTextWithMath(message.content))}
               {:else if !message.content}
@@ -509,7 +654,7 @@ ${summary.data_optimization ? `\n**Note:** ${summary.data_optimization}` : ''}`;
               {:else if typeof message.content === 'object'}
                 {#if message.content.chart_data}
                   <div class="max-w-full overflow-x-auto bg-white/5 p-2 rounded-md">
-                    <ChartComponent data={message.content.chart_data} type="line" />
+                    <ChartComponent data={message.content.chart_data} type={getChartTypeFromMessage(message)} />
                     {#if message.content.summary}
                       <div class="max-w-full overflow-x-hidden mt-4 p-3 bg-black/20 rounded-md">
                         <h4 class="text-sm font-semibold mb-2">Summary:</h4>
@@ -583,7 +728,7 @@ ${summary.data_optimization ? `\n**Note:** ${summary.data_optimization}` : ''}`;
 
         <div class="p-5">
           {#if chartData.data}
-            <ChartComponent data={chartData.data} type="line" />
+            <ChartComponent data={chartData.data} type={getChartType(chartData)} />
           {:else}
             <div class="text-center p-4 text-white/50">No chart data available</div>
           {/if}

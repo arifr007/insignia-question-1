@@ -6,6 +6,45 @@
   export let type = 'line';
   export let options = null;
 
+  // Function to decode binary data from Plotly format
+  function decodeBdata(bdataStr, dtype = 'f8') {
+    try {
+      // Decode base64 string to binary
+      const binaryString = atob(bdataStr);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      // Convert bytes to numbers based on dtype
+      const buffer = bytes.buffer;
+      let values = [];
+
+      if (dtype === 'f8') { // 64-bit float (double)
+        const floatArray = new Float64Array(buffer);
+        values = Array.from(floatArray);
+      } else if (dtype === 'f4') { // 32-bit float
+        const floatArray = new Float32Array(buffer);
+        values = Array.from(floatArray);
+      } else if (dtype === 'i8') { // 64-bit int
+        const intArray = new BigInt64Array(buffer);
+        values = Array.from(intArray, x => Number(x));
+      } else if (dtype === 'i4') { // 32-bit int
+        const intArray = new Int32Array(buffer);
+        values = Array.from(intArray);
+      } else {
+        // Default to 64-bit float
+        const floatArray = new Float64Array(buffer);
+        values = Array.from(floatArray);
+      }
+
+      return values;
+    } catch (error) {
+      console.error('Error decoding bdata:', error);
+      return [];
+    }
+  }
+
   let chartElement;
   let chartInstance;
   let Chart;
@@ -52,8 +91,49 @@
 
     try {
       console.log('Creating chart with data:', data);
+      console.log('Chart type:', type);
       const chartData = convertPlotlyToChartJS(data);
       console.log('Converted chart data:', chartData);
+
+      if (!chartData.datasets || chartData.datasets.length === 0) {
+        console.error('No datasets found in converted data, creating fallback');
+        
+        // Create a fallback chart with placeholder data to show something
+        const fallbackData = {
+          labels: ['No Data'],
+          datasets: [{
+            label: 'No Data Available',
+            data: [0],
+            backgroundColor: 'rgba(239, 68, 68, 0.5)',
+            borderColor: 'rgba(239, 68, 68, 1)',
+            borderWidth: 1
+          }]
+        };
+        
+        chartInstance = new Chart(chartElement, {
+          type: type === 'scatter' ? 'bar' : type, // Use bar for scatter fallback
+          data: fallbackData,
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: {
+                labels: { color: '#ffffff' }
+              },
+              title: {
+                display: true,
+                text: 'Chart data could not be loaded',
+                color: '#ffffff'
+              }
+            },
+            scales: type === 'pie' ? {} : {
+              x: { ticks: { color: '#ffffff' }, grid: { color: 'rgba(255, 255, 255, 0.1)' }},
+              y: { ticks: { color: '#ffffff' }, grid: { color: 'rgba(255, 255, 255, 0.1)' }}
+            }
+          }
+        });
+        return;
+      }
 
       const chartOptions = {
         responsive: true,
@@ -97,7 +177,9 @@
   }
 
   function convertPlotlyToChartJS(plotlyData) {
-    console.log('Converting Plotly data:', plotlyData, 'Chart type:', type);
+    console.log('=== convertPlotlyToChartJS START ===');
+    console.log('Input data:', plotlyData);
+    console.log('Chart type:', type);
 
     // Handle different data structures
     if (!plotlyData) {
@@ -107,19 +189,53 @@
 
     // If it's already Chart.js format
     if (plotlyData.datasets) {
-      console.log('Data is already in Chart.js format');
+      console.log('✓ Data is already in Chart.js format');
       return plotlyData;
     }
 
     // Handle API response structure: { status: "success", data: { chart_data: ..., raw_data: ..., summary: ... } }
     if (plotlyData.status === 'success' && plotlyData.data) {
-      console.log('Found API response structure, extracting data...');
+      console.log('✓ Found API response structure, extracting data...');
       return convertPlotlyToChartJS(plotlyData.data);
     }
 
     // Handle nested chart_data structure
     if (plotlyData.chart_data) {
-      console.log('Found nested chart_data, recursing...');
+      console.log('✓ Found nested chart_data, recursing...');
+      
+      // Check for double nested chart_data (trend charts)
+      if (plotlyData.chart_data.chart_data) {
+        console.log('✓ Found double nested chart_data structure');
+        
+        // Always prefer raw_data if available for trend charts
+        if (plotlyData.raw_data && plotlyData.chart_type) {
+          console.log('✓ Using raw_data for trend chart with chart_type:', plotlyData.chart_type);
+          return convertRawDataToChartJS(plotlyData.raw_data, plotlyData.chart_type);
+        }
+        
+        // If we have raw_data available and chart_data has encoded values, use raw_data instead
+        if (
+          plotlyData.raw_data &&
+          plotlyData.chart_data.chart_data.data &&
+          plotlyData.chart_data.chart_data.data[0] &&
+          ((plotlyData.chart_data.chart_data.data[0].y && plotlyData.chart_data.chart_data.data[0].y.bdata) ||
+            (plotlyData.chart_data.chart_data.data[0].values && plotlyData.chart_data.chart_data.data[0].values.bdata) ||
+            (plotlyData.chart_data.chart_data.data[0].z && plotlyData.chart_data.chart_data.data[0].z.bdata))
+        ) {
+          console.log('✓ Detected encoded values in double nested structure, using raw_data instead');
+          return convertRawDataToChartJS(plotlyData.raw_data, plotlyData.chart_type);
+        }
+        
+        console.log('→ Processing double nested chart_data');
+        return convertPlotlyToChartJS(plotlyData.chart_data.chart_data);
+      }
+      
+      // Always prefer raw_data if available and chart_type is present
+      if (plotlyData.raw_data && plotlyData.chart_type) {
+        console.log('✓ Using raw_data with chart_type:', plotlyData.chart_type);
+        return convertRawDataToChartJS(plotlyData.raw_data, plotlyData.chart_type);
+      }
+      
       // If we have raw_data available and chart_data has encoded values, use raw_data instead
       if (
         plotlyData.raw_data &&
@@ -129,37 +245,49 @@
           (plotlyData.chart_data.data[0].values && plotlyData.chart_data.data[0].values.bdata) ||
           (plotlyData.chart_data.data[0].z && plotlyData.chart_data.data[0].z.bdata))
       ) {
-        console.log('Detected encoded values, using raw_data instead');
+        console.log('✓ Detected encoded values, using raw_data instead');
         return convertRawDataToChartJS(plotlyData.raw_data, plotlyData.chart_type);
       }
+      console.log('→ Processing single nested chart_data');
       return convertPlotlyToChartJS(plotlyData.chart_data);
+    }
+
+    // Handle special case: heatmap data without chart_data.data array
+    if (plotlyData.chart_type === 'heatmap' && plotlyData.raw_data && 
+        plotlyData.raw_data.values && plotlyData.raw_data.x_labels && plotlyData.raw_data.y_labels) {
+      console.log('✓ Found heatmap data without plotly traces, using raw_data');
+      return convertRawDataToChartJS(plotlyData.raw_data, plotlyData.chart_type);
     }
 
     // Handle Plotly format with data array
     if (plotlyData.data && Array.isArray(plotlyData.data)) {
-      console.log('Found plotly data array with', plotlyData.data.length, 'traces');
+      console.log('✓ Found plotly data array with', plotlyData.data.length, 'traces');
       return convertPlotlyTraces(plotlyData.data);
     }
 
     // Handle direct array of traces
     if (Array.isArray(plotlyData)) {
-      console.log('Data is direct array of traces with', plotlyData.length, 'traces');
+      console.log('✓ Data is direct array of traces with', plotlyData.length, 'traces');
       return convertPlotlyTraces(plotlyData);
     }
 
     // Handle single trace
     if (plotlyData.x || plotlyData.y || plotlyData.values) {
-      console.log('Data is single trace, wrapping in array');
+      console.log('✓ Data is single trace, wrapping in array');
       return convertPlotlyTraces([plotlyData]);
     }
 
     // Fallback
-    console.warn('Unknown data format:', plotlyData);
+    console.warn('❌ Unknown data format:', plotlyData);
+    console.log('=== convertPlotlyToChartJS END (FALLBACK) ===');
     return { datasets: [] };
   }
 
   function convertRawDataToChartJS(rawData, chartType) {
-    console.log('Converting raw data:', rawData, 'for chart type:', chartType);
+    console.log('=== convertRawDataToChartJS START ===');
+    console.log('Raw data:', rawData);
+    console.log('Chart type:', chartType);
+    console.log('Component type prop:', type);
 
     if (!rawData) {
       console.warn('No valid raw data provided');
@@ -183,6 +311,7 @@
 
     // Handle different raw data structures based on chart type
     if (chartType === 'line_chart' || type === 'line') {
+      console.log('✓ Processing line chart with raw data');
       // For trend charts: rawData = [{ month_year: "2023-09", amount: 125481449636.86 }, ...]
       if (!Array.isArray(rawData) || rawData.length === 0) {
         console.warn('No valid array data for line chart');
@@ -191,8 +320,11 @@
 
       const labels = rawData.map(item => item.month_year || item.x || item.label);
       const values = rawData.map(item => item.amount || item.y || item.value);
+      
+      console.log('Line chart labels:', labels);
+      console.log('Line chart values:', values);
 
-      return {
+      const result = {
         labels: labels,
         datasets: [
           {
@@ -206,6 +338,10 @@
           }
         ]
       };
+      
+      console.log('✓ Line chart result:', result);
+      console.log('=== convertRawDataToChartJS END (LINE) ===');
+      return result;
     } else if (chartType === 'pie_chart' || type === 'pie') {
       // For pie charts: rawData = [{ functional_area_name: "Area", amount: 1000, percentage: 10.5 }, ...]
       if (!Array.isArray(rawData) || rawData.length === 0) {
@@ -229,26 +365,94 @@
         ]
       };
     } else if (chartType === 'bar_chart' || chartType === 'heatmap' || type === 'bar') {
+      console.log('✓ Processing bar/heatmap chart with raw data');
       // Handle different heatmap/bar chart structures
       if (rawData.values && rawData.x_labels && rawData.y_labels) {
-        // Heatmap structure: { values: [[val1, val2], ...], x_labels: [...], y_labels: [...] }
-        console.log('Processing heatmap raw data structure');
+        console.log('✓ Processing heatmap raw data structure with matrix values');
+        console.log('Values matrix:', rawData.values);
+        console.log('X labels (months):', rawData.x_labels);
+        console.log('Y labels (cost centers):', rawData.y_labels);
 
-        // For Chart.js, we'll represent the heatmap as a bar chart showing totals for each cost center
-        const labels = rawData.y_labels;
-        const values = rawData.values.map(row => row.reduce((sum, val) => sum + val, 0)); // Sum values for each cost center
+        // Create a more detailed bar chart representation of the heatmap
+        // We'll create a dataset for each functional area (x_labels)
+        const datasets = [];
+        const numFunctionalAreas = rawData.x_labels.length;
+        const numCostCenters = rawData.y_labels.length;
+
+        // Validate data structure
+        if (!Array.isArray(rawData.values) || rawData.values.length !== numCostCenters) {
+          console.warn('Heatmap values array length does not match y_labels length');
+          return { datasets: [] };
+        }
+
+        // For each functional area, create a dataset
+        for (let functionalAreaIndex = 0; functionalAreaIndex < numFunctionalAreas; functionalAreaIndex++) {
+          const functionalAreaData = [];
+          
+          // Extract values for this functional area across all cost centers
+          for (let costCenterIndex = 0; costCenterIndex < numCostCenters; costCenterIndex++) {
+            const rowValues = rawData.values[costCenterIndex];
+            const value = Array.isArray(rowValues) && rowValues[functionalAreaIndex] ? rowValues[functionalAreaIndex] : 0;
+            functionalAreaData.push(value);
+          }
+
+          datasets.push({
+            label: rawData.x_labels[functionalAreaIndex],
+            data: functionalAreaData,
+            backgroundColor: colors[functionalAreaIndex % colors.length],
+            borderColor: colors[functionalAreaIndex % colors.length].replace('0.8', '1'),
+            borderWidth: 1
+          });
+        }
+
+        const result = {
+          labels: rawData.y_labels, // Cost centers as x-axis labels
+          datasets: datasets
+        };
+        
+        console.log('✓ Heatmap chart result:', result);
+        console.log('=== convertRawDataToChartJS END (HEATMAP) ===');
+        return result;
+      } else if (rawData.cost_centers && rawData.functional_areas && rawData.amounts) {
+        // Alternative heatmap structure: { cost_centers: [...], functional_areas: [...], amounts: [...] }
+        console.log('Processing alternative heatmap structure');
+        
+        // Group by functional area and cost center
+        const functionalAreaGroups = {};
+        
+        for (let i = 0; i < rawData.cost_centers.length; i++) {
+          const costCenter = rawData.cost_centers[i];
+          const functionalArea = rawData.functional_areas[i];
+          const amount = rawData.amounts[i] || 0;
+          
+          if (!functionalAreaGroups[functionalArea]) {
+            functionalAreaGroups[functionalArea] = {};
+          }
+          functionalAreaGroups[functionalArea][costCenter] = amount;
+        }
+        
+        // Get unique cost centers for labels
+        const allCostCenters = [...new Set(rawData.cost_centers)];
+        const datasets = [];
+        
+        // Create dataset for each functional area
+        Object.keys(functionalAreaGroups).forEach((functionalArea, index) => {
+          const data = allCostCenters.map(costCenter => 
+            functionalAreaGroups[functionalArea][costCenter] || 0
+          );
+          
+          datasets.push({
+            label: functionalArea,
+            data: data,
+            backgroundColor: colors[index % colors.length],
+            borderColor: colors[index % colors.length].replace('0.8', '1'),
+            borderWidth: 1
+          });
+        });
 
         return {
-          labels: labels,
-          datasets: [
-            {
-              label: 'Total Amount',
-              data: values,
-              backgroundColor: colors[0],
-              borderColor: colors[0].replace('0.8', '1'),
-              borderWidth: 1
-            }
-          ]
+          labels: allCostCenters,
+          datasets: datasets
         };
       } else if (Array.isArray(rawData)) {
         // Array structure for bar charts: [{ cost_center_name: "CC1", amount: 1000 }, ...]
@@ -256,6 +460,9 @@
 
         if (rawData[0] && rawData[0].cost_center_name) {
           labels = rawData.map(item => item.cost_center_name || item.name);
+          values = rawData.map(item => item.amount || item.value);
+        } else if (rawData[0] && rawData[0].functional_area_name) {
+          labels = rawData.map(item => item.functional_area_name || item.name);
           values = rawData.map(item => item.amount || item.value);
         } else {
           // Generic bar data
@@ -272,6 +479,27 @@
               backgroundColor: colors[0],
               borderColor: colors[0].replace('0.8', '1'),
               borderWidth: 1
+            }
+          ]
+        };
+      }
+    } else if (chartType === 'scatter_plot' || type === 'scatter') {
+      // Handle scatter plot raw data 
+      if (Array.isArray(rawData) && rawData.length > 0) {
+        const chartData = rawData.map(item => ({
+          x: item.month_year || item.x || item.label,
+          y: item.amount || item.y || item.value
+        }));
+        
+        return {
+          datasets: [
+            {
+              label: 'Data Points',
+              data: chartData,
+              backgroundColor: colors[0],
+              borderColor: colors[0].replace('0.8', '1'),
+              borderWidth: 2,
+              pointRadius: 4
             }
           ]
         };
@@ -317,19 +545,16 @@
       ) {
         console.log('Creating pie chart dataset');
 
+        let values = [];
+        
         // Check if values are encoded
         if (trace.values && typeof trace.values === 'object' && trace.values.bdata) {
-          console.warn('Pie chart values are encoded, cannot decode. Returning empty dataset.');
-          return {
-            label: trace.name || `Dataset ${index + 1}`,
-            data: [],
-            backgroundColor: [],
-            borderColor: [],
-            borderWidth: 1
-          };
+          console.log('Decoding binary values for pie chart:', trace.values);
+          values = decodeBdata(trace.values.bdata, trace.values.dtype || 'f8');
+        } else {
+          values = trace.values || trace.y || [];
         }
 
-        const values = trace.values || trace.y || [];
         const _labels = trace.labels || trace.x || [];
 
         return {
@@ -342,19 +567,22 @@
       }
 
       // Handle scatter plots
-      if (trace.mode === 'markers' || trace.type === 'scatter' || type === 'scatter') {
+      if (trace.mode === 'markers' || (trace.type === 'scatter' && type === 'scatter')) {
         console.log('Creating scatter plot dataset');
+        let y = trace.y;
+        if (y && typeof y === 'object' && y.bdata) {
+          y = decodeBdata(y.bdata, y.dtype || 'f8');
+        }
         const chartData = [];
-        if (trace.x && trace.y && Array.isArray(trace.x) && Array.isArray(trace.y)) {
-          for (let i = 0; i < Math.min(trace.x.length, trace.y.length); i++) {
+        if (trace.x && y && Array.isArray(trace.x) && Array.isArray(y)) {
+          for (let i = 0; i < Math.min(trace.x.length, y.length); i++) {
             chartData.push({
               x: trace.x[i],
-              y: trace.y[i]
+              y: y[i]
             });
           }
         }
         console.log(`Scatter dataset ${index} created with ${chartData.length} points`);
-
         // Use specific colors for anomaly detection
         let backgroundColor, borderColor;
         if (trace.name && trace.name.includes('Anomalies')) {
@@ -367,7 +595,6 @@
           backgroundColor = colors[colorIndex];
           borderColor = borderColors[colorIndex];
         }
-
         return {
           label: trace.name || `Dataset ${index + 1}`,
           data: chartData,
@@ -378,33 +605,70 @@
           pointStyle: trace.name && trace.name.includes('Anomalies') ? 'cross' : 'circle'
         };
       }
-
       // Handle line/bar charts
       console.log('Creating line/bar chart dataset');
+      let y = trace.y;
+      if (y && typeof y === 'object' && y.bdata) {
+        console.log('Decoding binary y data for line/bar chart:', y);
+        y = decodeBdata(y.bdata, y.dtype || 'f8');
+        console.log('Decoded y values:', y);
+      }
       let chartData = [];
-
-      if (trace.x && trace.y) {
-        // Check if y values are encoded (binary data)
-        if (trace.y && typeof trace.y === 'object' && trace.y.bdata) {
-          console.warn(
-            'Y values are encoded, cannot decode binary data. Chart may not display correctly.'
-          );
-          chartData = []; // Empty data as we can't decode
-        } else if (type === 'line') {
+      if (trace.x && y) {
+        if (type === 'line' || (trace.mode && trace.mode.includes('lines'))) {
           // For line charts, create x-y point objects
           chartData = trace.x.map((x, i) => ({
             x: x,
-            y: trace.y[i]
+            y: y[i]
           }));
+          console.log('Created line chart data with', chartData.length, 'points');
         } else {
           // For bar charts, just use y values
-          chartData = trace.y;
+          chartData = y;
+          console.log('Created bar chart data with', chartData.length, 'values');
         }
-      } else if (trace.y && !trace.y.bdata) {
-        chartData = trace.y;
+      } else if (y) {
+        chartData = y;
+        console.log('Using y values directly with', chartData.length, 'values');
       } else if (trace.z) {
-        // Handle heatmap data (flatten z matrix)
-        chartData = Array.isArray(trace.z[0]) ? trace.z.flat() : trace.z;
+        // Handle heatmap data (special case for z matrix)
+        let z = trace.z;
+        if (z && typeof z === 'object' && z.bdata) {
+          console.log('Decoding binary z data for heatmap:', z);
+          z = decodeBdata(z.bdata, z.dtype || 'f8');
+          console.log('Decoded z values:', z);
+        }
+        if (Array.isArray(z) && Array.isArray(z[0])) {
+          // 2D array for heatmap - convert to grouped bar chart
+          const numRows = z.length;
+          const numCols = z[0].length;
+          console.log(`Processing 2D heatmap data: ${numRows}x${numCols}`);
+          // Use x and y labels if available, otherwise generate them
+          const xLabels = trace.x || Array.from({length: numCols}, (_, i) => `Col ${i + 1}`);
+          const yLabels = trace.y || Array.from({length: numRows}, (_, i) => `Row ${i + 1}`);
+          // Create datasets for each column (functional area)
+          const heatmapDatasets = [];
+          for (let col = 0; col < numCols; col++) {
+            const columnData = [];
+            for (let row = 0; row < numRows; row++) {
+              columnData.push(z[row][col] || 0);
+            }
+            heatmapDatasets.push({
+              label: xLabels[col] || `Series ${col + 1}`,
+              data: columnData,
+              backgroundColor: colors[col % colors.length],
+              borderColor: borderColors[col % colors.length],
+              borderWidth: 1
+            });
+          }
+          return {
+            labels: yLabels,
+            datasets: heatmapDatasets
+          };
+        } else {
+          console.log('Using 1D z data as single dataset');
+          chartData = Array.isArray(z) ? z : [z];
+        }
       }
 
       return {
@@ -448,7 +712,7 @@
 
     const baseConfig = {
       x: {
-        type: type === 'scatter' ? 'category' : 'linear',
+        type: type === 'line' ? 'category' : (type === 'scatter' ? 'category' : 'category'),
         ticks: {
           color: '#ffffff'
         },
@@ -459,7 +723,18 @@
       y: {
         type: 'linear',
         ticks: {
-          color: '#ffffff'
+          color: '#ffffff',
+          callback: function(value) {
+            // Format large numbers nicely
+            if (Math.abs(value) >= 1000000000) {
+              return (value / 1000000000).toFixed(1) + 'B';
+            } else if (Math.abs(value) >= 1000000) {
+              return (value / 1000000).toFixed(1) + 'M';
+            } else if (Math.abs(value) >= 1000) {
+              return (value / 1000).toFixed(1) + 'K';
+            }
+            return value;
+          }
         },
         grid: {
           color: 'rgba(255, 255, 255, 0.1)'
