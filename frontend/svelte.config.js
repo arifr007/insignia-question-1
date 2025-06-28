@@ -8,9 +8,9 @@ export default {
   // Svelte 5 specific options
   compilerOptions: {
     // Enable modern features
-    modernAst: true,
+    modernAst: false,
     // HMR is now integrated in Svelte 5 core
-    hmr: true,
+    hmr: false,
     // Updated compatibility options for Svelte 5
     compatibility: {
       componentApi: 4 // Maintain compatibility with Svelte 4 component API
