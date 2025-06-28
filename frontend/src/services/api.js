@@ -8,6 +8,7 @@ class ApiService {
     this.api = axios.create({
       baseURL: API_BASE_URL,
       withCredentials: true,
+      timeout: 30000, // 30 second timeout
       headers: {
         'Content-Type': 'application/json'
       }
@@ -15,6 +16,7 @@ class ApiService {
 
     this.isRefreshing = false;
     this.failedQueue = [];
+    this.maxQueueSize = 10; // Prevent memory leak from too many queued requests
 
     // Add auth token to requests
     this.api.interceptors.request.use(config => {
@@ -50,6 +52,11 @@ class ApiService {
 
         if (error.response?.status === 401 && !originalRequest._retry) {
           if (this.isRefreshing) {
+            // Prevent queue overflow
+            if (this.failedQueue.length >= this.maxQueueSize) {
+              return Promise.reject(new Error('Too many queued requests'));
+            }
+            
             // If we're already refreshing, queue this request
             return new Promise((resolve, reject) => {
               this.failedQueue.push({ resolve, reject });
@@ -87,15 +94,19 @@ class ApiService {
   }
 
   processQueue(error, token = null) {
-    this.failedQueue.forEach(({ resolve, reject }) => {
-      if (error) {
-        reject(error);
-      } else {
-        resolve(token);
-      }
-    });
-
-    this.failedQueue = [];
+    try {
+      this.failedQueue.forEach(({ resolve, reject }) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(token);
+        }
+      });
+    } catch (e) {
+      console.error('Error processing queue:', e);
+    } finally {
+      this.failedQueue = [];
+    }
   }
 
   async refreshAccessToken() {
@@ -296,8 +307,25 @@ class ApiService {
     const payload = {
       message
     };
-    const response = await this.api.post(`/chat/${roomId}`, payload);
-    return response.data;
+    
+    try {
+      // Use longer timeout for chat messages as they involve AI processing
+      const response = await this.api.post(`/chat/${roomId}`, payload, {
+        timeout: 60000 // 60 seconds for AI processing
+      });
+      return response.data;
+    } catch (error) {
+      console.error('API sendMessage error:', error);
+      
+      // Add error type identification for better handling
+      if (error.code === 'ECONNABORTED') {
+        error.isTimeout = true;
+      } else if (error.response?.status >= 500) {
+        error.isServerError = true;
+      }
+      
+      throw error;
+    }
   }
 
   // EDA methods

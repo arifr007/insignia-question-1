@@ -130,18 +130,58 @@ export const chatRoomStore = {
 
       return response;
     } catch (error) {
-      // Remove the temporary user message and add error message
-      currentRoomMessages.update(messages => {
-        const filtered = messages.filter(msg => !msg.id?.startsWith('temp-'));
-        return [
-          ...filtered,
+      console.error('Store sendMessage error:', error);
+      
+      // For timeout or server errors, the message might still be saved on backend
+      if (error.isTimeout || error.isServerError || 
+          error.code === 'ECONNABORTED' || error.response?.status >= 500) {
+        
+        // Show info message but keep temp message as it might have been saved
+        currentRoomMessages.update(messages => [
+          ...messages,
           {
-            type: 'error',
-            content: `Error: ${error.response?.data?.error || 'Failed to send message'}`,
+            type: 'system',
+            content: 'Message sent but response was slow. Checking with server...',
             timestamp: new Date()
           }
-        ];
-      });
+        ]);
+        
+        // Try to reload after delay to check if message was actually saved
+        setTimeout(async () => {
+          try {
+            await this.selectRoom(roomId);
+          } catch (reloadError) {
+            console.error('Failed to reload after error:', reloadError);
+            // If reload also fails, show final error
+            currentRoomMessages.update(messages => {
+              const filtered = messages.filter(msg => !msg.id?.startsWith('temp-'));
+              return [
+                ...filtered,
+                {
+                  type: 'error',
+                  content: 'Failed to send message. Please try again.',
+                  timestamp: new Date()
+                }
+              ];
+            });
+          }
+        }, 3000);
+        
+      } else {
+        // For other errors (4xx client errors), remove temp message and show error immediately
+        currentRoomMessages.update(messages => {
+          const filtered = messages.filter(msg => !msg.id?.startsWith('temp-'));
+          return [
+            ...filtered,
+            {
+              type: 'error',
+              content: `Error: ${error.response?.data?.error || 'Failed to send message'}`,
+              timestamp: new Date()
+            }
+          ];
+        });
+      }
+      
       throw error;
     }
   },
