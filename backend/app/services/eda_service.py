@@ -1,12 +1,22 @@
 from app.models.postgres import SessionLocal, FinanceExpense
 import pandas as pd
 
+def _normalize_amount(value, debit_credit_ind):
+    try:
+        amount = float(value or 0)
+        if debit_credit_ind == 'H' and amount > 0:
+            return -amount
+        elif debit_credit_ind == 'S' and amount < 0:
+            return -amount
+        return amount
+    except Exception:
+        return 0
+
 def get_eda_summary():
     session = SessionLocal()
     try:
         result = session.query(FinanceExpense).all()
-        
-        # Create comprehensive dataframe with all available columns
+
         df = pd.DataFrame([{
             "id": r.id,
             "posting_period": r.posting_period,
@@ -28,7 +38,7 @@ def get_eda_summary():
             "currency": r.company_code_currency_key,
             "debit_credit_ind": r.debit_credit_ind,
             "raw_amount": float(r.company_code_currency_value or 0),
-            "amount": float(r.company_code_currency_value or 0) * (-1 if r.debit_credit_ind == 'H' else 1),
+            "amount": _normalize_amount(r.company_code_currency_value, r.debit_credit_ind),
             "supplier": r.supplier if r.supplier else None,
             "reference": r.reference if r.reference else None,
             "document_header_text": r.document_header_text if r.document_header_text else None,
@@ -40,20 +50,24 @@ def get_eda_summary():
             "entity": r.entity if r.entity else None,
             "remapping_directorate": r.remapping_directorate if r.remapping_directorate else None,
             "status": r.status if r.status else None,
-            # Derived fields for compatibility
             "month_year": f"{r.general_ledger_fiscal_year}-{r.posting_period:02d}" if r.general_ledger_fiscal_year and r.posting_period else None
         } for r in result])
 
-        # Enhanced summary with all dimensions
         summary = {
             "total_rows": len(df),
             "data_quality": {
                 "missing_values": df.isnull().sum().to_dict(),
                 "unique_counts": df.nunique().to_dict(),
                 "data_completeness": {
-                    "amount_records": len(df[df['amount'] > 0]),
+                    "valid_debit_records": len(df[(df['amount'] > 0) & (df['debit_credit_ind'] == 'S')]),
+                    "valid_credit_records": len(df[(df['amount'] < 0) & (df['debit_credit_ind'] == 'H')]),
                     "zero_amount_records": len(df[df['amount'] == 0]),
-                    "negative_amount_records": len(df[df['amount'] < 0])
+                    "inconsistent_records": len(df[((df['debit_credit_ind'] == 'S') & (df['amount'] < 0)) |
+                                                    ((df['debit_credit_ind'] == 'H') & (df['amount'] > 0))])
+                },
+                "warnings": {
+                    "non_numeric_amounts": sum(pd.to_numeric(df['raw_amount'], errors='coerce').isna()),
+                    "unknown_debit_credit_code": df[~df['debit_credit_ind'].isin(['S', 'H'])].shape[0]
                 }
             },
             "financial_summary": {
@@ -90,33 +104,31 @@ def get_eda_summary():
                 "top_entities": df[df['entity'].notna()].groupby("entity")["amount"].sum().nlargest(5).to_dict()
             }
         }
-        
+
         return summary
-    
+
     finally:
         session.close()
 
 def get_detailed_breakdown(dimension, top_n=10):
-    """Get detailed breakdown by specific dimension"""
     session = SessionLocal()
     try:
         result = session.query(FinanceExpense).all()
-        
+
         df = pd.DataFrame([{
-            "id": r.id,
-            "amount": float(r.company_code_currency_value or 0) * (-1 if r.debit_credit_ind == 'H' else 1),
+            "amount": _normalize_amount(r.company_code_currency_value, r.debit_credit_ind),
             "dimension_value": getattr(r, dimension, 'Unknown'),
             "cost_center_id": r.cost_center_id,
             "directorate": r.directorate or "",
             "month_year": f"{r.general_ledger_fiscal_year}-{r.posting_period:02d}" if r.general_ledger_fiscal_year and r.posting_period else ""
         } for r in result])
-        
+
         breakdown = df.groupby("dimension_value").agg({
             "amount": ["sum", "count", "mean", "std"],
             "cost_center_id": "nunique",
             "directorate": "nunique"
         }).round(2)
-        
+
         return {
             "dimension": dimension,
             "breakdown": breakdown.nlargest(top_n, ("amount", "sum")).to_dict(),
@@ -126,28 +138,25 @@ def get_detailed_breakdown(dimension, top_n=10):
                 "showing_top": min(top_n, len(breakdown))
             }
         }
-    
+
     finally:
         session.close()
 
 def get_time_series_analysis(group_by="month_year"):
-    """Get time series analysis"""
     session = SessionLocal()
     try:
         result = session.query(FinanceExpense).all()
-        
+
         df = pd.DataFrame([{
-            "amount": float(r.company_code_currency_value or 0) * (-1 if r.debit_credit_ind == 'H' else 1),
+            "amount": _normalize_amount(r.company_code_currency_value, r.debit_credit_ind),
             "month_year": f"{r.general_ledger_fiscal_year}-{r.posting_period:02d}" if r.general_ledger_fiscal_year and r.posting_period else "",
             "fiscal_year": r.general_ledger_fiscal_year,
             "posting_period": r.posting_period,
             "directorate": r.directorate or ""
         } for r in result])
-        
-        # Time series by specified grouping
+
         if group_by == "month_year":
-            # Sort by fiscal year and posting period to ensure correct chronological order
-            df['sort_key'] = pd.to_datetime(df['month_year'], format='%Y-%m')
+            df['sort_key'] = pd.to_datetime(df['month_year'], format='%Y-%m', errors='coerce')
             df = df.sort_values('sort_key')
             time_series = df.groupby("month_year")["amount"].agg(["sum", "count", "mean"]).reset_index()
         elif group_by == "fiscal_year":
@@ -156,12 +165,11 @@ def get_time_series_analysis(group_by="month_year"):
         else:
             time_series = df.groupby("posting_period")["amount"].agg(["sum", "count", "mean"]).reset_index()
             time_series = time_series.sort_values('posting_period')
-        
-        # Calculate growth rates
+
         previous_amounts = time_series['sum'].shift(1)
         current_amounts = time_series['sum']
         time_series['growth_rate'] = ((current_amounts - previous_amounts) / previous_amounts.abs()) * 100
-        
+
         return {
             "time_series": time_series.to_dict('records'),
             "summary": {
@@ -171,6 +179,6 @@ def get_time_series_analysis(group_by="month_year"):
                 "min_amount_period": time_series.loc[time_series['sum'].idxmin()].to_dict()
             }
         }
-    
+
     finally:
         session.close()

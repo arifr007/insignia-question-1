@@ -7,6 +7,16 @@ from sklearn.metrics import mean_absolute_error
 import warnings
 warnings.filterwarnings('ignore')
 
+def _normalize_amount(value, debit_credit_ind):
+    try:
+        amount = float(value or 0)
+        if debit_credit_ind == 'H':  # Kredit
+            return -abs(amount)
+        elif debit_credit_ind == 'S':  # Debit
+            return abs(amount)
+        return 0
+    except Exception:
+        return 0
 
 class AdvancedRCAService:
     def __init__(self):
@@ -25,25 +35,34 @@ class AdvancedRCAService:
 
     def get_historical_data(self):
         result = self.session.query(FinanceExpense).all()
-        return pd.DataFrame([{
-            "cost_center_id": r.cost_center_id,
-            "cost_center_name": r.cost_center_name,
-            "functional_area": r.functional_area,
-            "functional_area_name": r.functional_area_name,
-            "amount": float(r.company_code_currency_value or 0) * (-1 if r.debit_credit_ind == 'H' else 1),
-            "month_year": f"{r.general_ledger_fiscal_year}-{r.posting_period:02d}" if r.general_ledger_fiscal_year and r.posting_period else "",
-            "directorate": r.directorate or "",
-            "general_ledger_account": r.general_ledger_account,
-            "profit_center_id": r.profit_center_id,
-            "level_1": r.level_1 or "",
-            "level_7": r.level_7 or "",
-            "account_type": r.account_type or "",
-            "supplier": r.supplier or ""
-        } for r in result])
+        records = []
+        for r in result:
+            month_year = f"{r.general_ledger_fiscal_year}-{r.posting_period:02d}" if r.general_ledger_fiscal_year and r.posting_period else ""
+            amount = _normalize_amount(r.company_code_currency_value, r.debit_credit_ind)
+            records.append({
+                "cost_center_id": r.cost_center_id,
+                "cost_center_name": r.cost_center_name,
+                "functional_area": r.functional_area,
+                "functional_area_name": r.functional_area_name,
+                "amount": amount,
+                "month_year": month_year,
+                "directorate": r.directorate or "",
+                "general_ledger_account": r.general_ledger_account,
+                "profit_center_id": r.profit_center_id,
+                "level_1": r.level_1 or "",
+                "level_7": r.level_7 or "",
+                "account_type": r.account_type or "",
+                "supplier": r.supplier or "",
+                "debit_credit_ind": r.debit_credit_ind,
+                "raw_amount": r.company_code_currency_value,
+            })
+        return pd.DataFrame(records)
 
     def ml_root_cause_analysis(self, from_month, to_month):
         df = self.get_historical_data()
-        if df.empty or len(df) < 20:
+        df = df[df['month_year'].notna() & (df['month_year'] != '')]
+
+        if df.empty or len(df) < 30:
             return {"error": "Insufficient data for ML analysis"}
 
         categorical_features = [
@@ -61,11 +80,7 @@ class AdvancedRCAService:
         encoded_features = [f + '_encoded' for f in categorical_features]
         group_cols = ['month_year'] + encoded_features
 
-        agg_df = df.groupby(group_cols).agg({
-            'amount': 'sum'
-        }).reset_index()
-        agg_df.columns = ['_'.join(col).strip('_') if isinstance(col, tuple) else col for col in agg_df.columns.values]
-
+        agg_df = df.groupby(group_cols).agg({'amount': 'sum'}).reset_index()
         X = agg_df[encoded_features]
         y = agg_df['amount']
 
@@ -73,7 +88,7 @@ class AdvancedRCAService:
         model.fit(X, y)
 
         feature_importance = pd.DataFrame({
-            'feature': [f.replace('_encoded', '') for f in X.columns],
+            'feature': [f.replace('_encoded', '') for f in encoded_features],
             'importance': model.feature_importances_
         }).sort_values('importance', ascending=False)
 
@@ -109,7 +124,6 @@ class AdvancedRCAService:
     def close_session(self):
         if self.session:
             self.session.close()
-
 
 def perform_comprehensive_rca(from_month, to_month):
     rca = AdvancedRCAService()
