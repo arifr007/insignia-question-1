@@ -219,20 +219,20 @@
             <DashboardCard
               title="Data Completeness"
               items={[
-                ['Total Amount Records', edaData.data_quality.data_completeness.amount_records],
-                [
-                  'Negative Amount Records',
-                  edaData.data_quality.data_completeness.negative_amount_records
-                ],
+                ['Valid Credit Records', edaData.data_quality.data_completeness.valid_credit_records],
+                ['Valid Debit Records', edaData.data_quality.data_completeness.valid_debit_records],
+                ['Inconsistent Records', edaData.data_quality.data_completeness.inconsistent_records],
                 ['Zero Amount Records', edaData.data_quality.data_completeness.zero_amount_records]
               ]}
               formatValue={(value, key) => {
-                if (key === 'Total Amount Records') return formatNumber(value);
                 return formatNumber(value);
               }}
               valueColor={(key, value) => {
-                if (key === 'Total Amount Records') return 'text-gray-900';
-                return value > 0 ? 'text-yellow-600' : 'text-green-600';
+                if (key === 'Valid Credit Records' || key === 'Valid Debit Records') return 'text-green-600';
+                if (key === 'Inconsistent Records' || key === 'Zero Amount Records') {
+                  return value > 0 ? 'text-yellow-600' : 'text-green-600';
+                }
+                return 'text-gray-900';
               }}
             />
           {/if}
